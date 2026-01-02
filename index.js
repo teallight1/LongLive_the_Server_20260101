@@ -1,22 +1,20 @@
+// ===========================
+// TV SYNC SERVER v3.0.0 (v20260102_1015PST_v1)
+// Server-side filtering fix
+// ===========================
+
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
-// ===========================
-// CONFIGURATION
-// ===========================
-const STATE_FILE = path.join(__dirname, 'server-state.json');
-const BROWSER_TIMEOUT = 15000;      // 15s - browser considered disconnected
-const MASTER_TIMEOUT = 15000;       // 15s - master considered gone, auto-transfer
-const CSV_FETCH_INTERVAL = 120000;  // 120s default
-const SIGNAL_TTL = 30000;           // 30s signal expiration
+const PORT = process.env.PORT || 10000;
+const STATE_FILE = './server-state.json';
 
-// Google Sheet CSV URL (can be updated by master)
+// Default CSV URL
 let csvUrl = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT1jm8cmzAnIk8kkO_d3mIZXmD6xaXPRd4Z7ww3EboYujHHHqbwkSqlevXA1ahvUv1Y0CUzQgtHl1FU/pub?gid=0&single=true&output=csv';
 
 // ===========================
@@ -39,7 +37,7 @@ let state = {
   navigationMode: 'url',  // 'url' or 'typing'
   historyAutoClear: 7,    // days
   
-  // Rating filters (synced from master)
+  // Rating filters (synced from master) - APPLIED SERVER-SIDE
   selectedFilters: ['Comfortable'],
   
   // Thresholds and Cooldowns (synced from master)
@@ -50,12 +48,9 @@ let state = {
     cooldown_2x: 15, cooldown_2c: 15, cooldown_2_plus: 15, cooldown_2_minus: 15
   },
   
-  // These are NOT synced (independent per browser)
-  // alertConditionSettings, alertTimeframeSettings, screenshotSettings
-  
   // Symbol data (from CSV)
-  allSymbols: [],         // Raw CSV data
-  filteredData: [],       // After applying filters
+  allSymbols: [],         // Raw CSV data (ALL symbols)
+  filteredData: [],       // FILTERED by selectedFilters - THIS IS WHAT WE ROTATE
   lastCsvFetch: 0,
   
   // Master tracking
@@ -71,16 +66,33 @@ let state = {
 let browsers = new Map();
 
 // Alert collection
-let intervalAlerts = {};
-let rotationAlerts = {};
-let currentIntervalId = null;
-let currentRotationId = null;
-let intervalSignalTime = 0;
-let rotationSignalTime = 0;
+let intervalAlerts = new Map();
+let rotationAlerts = new Map();
 
-// Rotation timer reference
+// Timers
 let rotationTimer = null;
 let csvFetchTimer = null;
+
+// ===========================
+// APPLY FILTERS - KEY FIX!
+// ===========================
+function applyFilters() {
+  if (state.allSymbols.length > 0 && state.selectedFilters.length > 0) {
+    state.filteredData = state.allSymbols.filter(item => 
+      state.selectedFilters.includes(item['Rating'])
+    );
+  } else {
+    state.filteredData = state.allSymbols;
+  }
+  
+  // Reset index if it exceeds filtered data length
+  if (state.currentIndex >= state.filteredData.length) {
+    state.currentIndex = 0;
+    state.rotationsCount++;
+  }
+  
+  console.log(`🏷️ Filters applied: ${state.filteredData.length}/${state.allSymbols.length} symbols (${state.selectedFilters.join(', ')})`);
+}
 
 // ===========================
 // STATE PERSISTENCE
@@ -104,7 +116,7 @@ function saveState() {
       savedAt: Date.now()
     };
     fs.writeFileSync(STATE_FILE, JSON.stringify(saveData, null, 2));
-    console.log(`💾 State saved (index: ${state.currentIndex})`);
+    console.log(`💾 State saved (index: ${state.currentIndex}/${state.filteredData.length})`);
   } catch (e) {
     console.error('❌ Failed to save state:', e.message);
   }
@@ -128,7 +140,10 @@ function loadState() {
       state.lastCsvFetch = data.lastCsvFetch || 0;
       if (data.csvUrl) csvUrl = data.csvUrl;
       
-      console.log(`📂 State loaded (index: ${state.currentIndex}, symbols: ${state.allSymbols.length})`);
+      // Apply filters after loading
+      applyFilters();
+      
+      console.log(`📂 State loaded (index: ${state.currentIndex}, filtered: ${state.filteredData.length}/${state.allSymbols.length})`);
       return true;
     }
   } catch (e) {
@@ -147,259 +162,222 @@ async function fetchCSV() {
     const response = await fetch(csvUrl + '&t=' + Date.now());
     const text = await response.text();
     
-    const lines = text.trim().split('\n');
-    const headers = lines[0].split(',');
-    
-    const data = lines.slice(1).map(line => {
-      const values = line.split(',');
-      const obj = {};
-      headers.forEach((h, i) => {
-        obj[h.trim()] = values[i]?.trim() || '';
-      });
-      return obj;
-    });
-    
-    state.allSymbols = data;
-    state.lastCsvFetch = Date.now();
-    
-    // Get unique ratings for reference
-    const ratings = [...new Set(data.map(item => item['Rating']))];
-    console.log(`✅ CSV: ${data.length} symbols, ratings: ${ratings.join(', ')}`);
-    
-    // Preserve position if possible
-    if (state.currentIndex >= data.length) {
-      state.currentIndex = 0;
+    const lines = text.split('\n').filter(l => l.trim());
+    if (lines.length < 2) {
+      console.log('⚠️ CSV empty or invalid');
+      return false;
     }
     
-    saveState();
-    return true;
+    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+    
+    const newSymbols = [];
+    for (let i = 1; i < lines.length; i++) {
+      const values = parseCSVLine(lines[i]);
+      if (values.length >= headers.length) {
+        const row = {};
+        headers.forEach((h, idx) => row[h] = values[idx]);
+        if (row.Symbol && row.Exchange) {
+          newSymbols.push(row);
+        }
+      }
+    }
+    
+    if (newSymbols.length > 0) {
+      state.allSymbols = newSymbols;
+      state.lastCsvFetch = Date.now();
+      
+      // Apply filters after fetching
+      applyFilters();
+      
+      console.log(`✅ CSV loaded: ${state.filteredData.length}/${state.allSymbols.length} symbols`);
+      saveState();
+      return true;
+    }
   } catch (e) {
     console.error('❌ CSV fetch failed:', e.message);
-    return false;
   }
+  return false;
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      result.push(current.trim().replace(/^"|"$/g, ''));
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  result.push(current.trim().replace(/^"|"$/g, ''));
+  return result;
 }
 
 function startCsvFetchTimer() {
   if (csvFetchTimer) clearInterval(csvFetchTimer);
-  
-  csvFetchTimer = setInterval(() => {
-    fetchCSV();
-  }, state.fetchInterval * 1000);
-  
-  console.log(`📊 CSV fetch timer: every ${state.fetchInterval}s`);
+  csvFetchTimer = setInterval(fetchCSV, state.fetchInterval * 1000);
+  console.log(`📊 CSV fetch timer: ${state.fetchInterval}s`);
 }
 
 // ===========================
-// ROTATION
+// ROTATION - NOW USES FILTERED DATA
 // ===========================
 function rotate() {
-  if (state.isPaused || state.allSymbols.length === 0) return;
-  if (browsers.size === 0) {
-    console.log('⏸️ No browsers connected, skipping rotation');
-    return;
+  if (state.isPaused || state.filteredData.length === 0) return;
+  
+  state.currentIndex++;
+  
+  // Use FILTERED data length, not allSymbols
+  if (state.currentIndex >= state.filteredData.length) {
+    state.currentIndex = 0;
+    state.rotationsCount++;
+    
+    // Signal rotation complete
+    const rotationId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    rotationAlerts.set(rotationId, {
+      createdAt: Date.now(),
+      respondedBrowsers: new Set()
+    });
+    
+    console.log(`🔄 Rotation cycle complete! Starting #${state.rotationsCount + 1}`);
   }
   
-  const previousIndex = state.currentIndex;
-  state.currentIndex = (state.currentIndex + 1) % state.allSymbols.length;
-  state.rotationsCount++;
   state.lastRotationTime = Date.now();
   
-  const symbol = state.allSymbols[state.currentIndex];
-  console.log(`🔄 Rotated to ${symbol?.Symbol} (${state.currentIndex + 1}/${state.allSymbols.length})`);
-  
-  // Rotation cycle complete
-  if (state.currentIndex === 0 && previousIndex > 0) {
-    console.log('🔄 Rotation cycle complete');
-    state.rotationStartTime = Date.now();
+  // Get current symbol from FILTERED data
+  const current = state.filteredData[state.currentIndex];
+  if (current) {
+    console.log(`📍 ${state.currentIndex + 1}/${state.filteredData.length}: ${current.Exchange}:${current.Symbol}`);
   }
-  
-  // Save state periodically (every 10 rotations)
-  if (state.rotationsCount % 10 === 0) {
-    saveState();
-  }
-}
-
-function startRotationTimer() {
-  if (rotationTimer) clearInterval(rotationTimer);
-  
-  state.isRotating = true;
-  state.lastRotationTime = Date.now();
-  
-  rotationTimer = setInterval(() => {
-    rotate();
-  }, state.rotateInterval * 1000);
-  
-  console.log(`⏱️ Rotation timer: every ${state.rotateInterval}s`);
-}
-
-function stopRotationTimer() {
-  if (rotationTimer) {
-    clearInterval(rotationTimer);
-    rotationTimer = null;
-  }
-  state.isRotating = false;
-  console.log('⏱️ Rotation timer stopped');
 }
 
 function restartRotationTimer() {
-  stopRotationTimer();
-  startRotationTimer();
-}
-
-// ===========================
-// BROWSER TRACKING
-// ===========================
-function cleanupBrowsers() {
-  const now = Date.now();
-  const expired = [];
-  
-  browsers.forEach((browser, id) => {
-    if (now - browser.lastSeen > BROWSER_TIMEOUT) {
-      expired.push(id);
-    }
-  });
-  
-  expired.forEach(id => {
-    console.log(`🧹 Browser disconnected: ${id.slice(-8)}`);
-    browsers.delete(id);
-  });
-  
-  // Check if master timed out
-  if (state.settingsMasterId) {
-    const masterBrowser = browsers.get(state.settingsMasterId);
-    if (!masterBrowser || now - state.settingsMasterLastSeen > MASTER_TIMEOUT) {
-      console.log(`👑 Master timed out: ${state.settingsMasterId?.slice(-8)}`);
-      state.settingsMasterId = null;
-      state.settingsMasterLastSeen = 0;
-      
-      // Auto-transfer to first available browser
-      if (browsers.size > 0) {
-        const firstBrowser = browsers.keys().next().value;
-        state.settingsMasterId = firstBrowser;
-        state.settingsMasterLastSeen = now;
-        
-        // Set justBecameMaster flag for toast notification
-        const browser = browsers.get(firstBrowser);
-        if (browser) browser.justBecameMaster = true;
-        
-        console.log(`👑 Auto-transferred master to: ${firstBrowser.slice(-8)}`);
-      }
-    }
-  }
-  
-  return expired.length;
-}
-
-function getBrowsersList() {
-  const now = Date.now();
-  const list = [];
-  
-  browsers.forEach((browser, id) => {
-    const age = now - browser.lastSeen;
-    list.push({
-      browserId: id,
-      shortId: id.slice(-8),
-      tf: browser.tf || '?',
-      isMaster: id === state.settingsMasterId,
-      status: age < 5000 ? 'online' : age < BROWSER_TIMEOUT ? 'stale' : 'offline',
-      lastSeen: age < 3000 ? 'now' : `${Math.floor(age / 1000)}s ago`
-    });
-  });
-  
-  // Sort: master first
-  list.sort((a, b) => {
-    if (a.isMaster) return -1;
-    if (b.isMaster) return 1;
-    return 0;
-  });
-  
-  return list;
-}
-
-// ===========================
-// HELPERS
-// ===========================
-function generateSignalId() {
-  return `${Date.now() % 10}_${Math.random().toString(36).substr(2, 6)}`;
-}
-
-function getCurrentSymbol() {
-  if (state.allSymbols.length === 0) return null;
-  return state.allSymbols[state.currentIndex] || null;
+  if (rotationTimer) clearInterval(rotationTimer);
+  rotationTimer = setInterval(rotate, state.rotateInterval * 1000);
+  console.log(`⏱️ Rotation timer: ${state.rotateInterval}s`);
 }
 
 function getTimeToNextRotation() {
-  if (!state.isRotating || state.isPaused) return 0;
   const elapsed = Date.now() - state.lastRotationTime;
-  const remaining = (state.rotateInterval * 1000) - elapsed;
-  return Math.max(0, remaining);
+  const remaining = Math.max(0, (state.rotateInterval * 1000) - elapsed);
+  return Math.ceil(remaining / 1000);
 }
 
 // ===========================
-// ROUTES
+// INTERVAL SUMMARY SIGNALS
+// ===========================
+function createIntervalSignal() {
+  const intervalId = `${state.currentIndex}_${Math.random().toString(36).substr(2, 6)}`;
+  intervalAlerts.set(intervalId, {
+    createdAt: Date.now(),
+    alerts: [],
+    respondedBrowsers: new Set()
+  });
+  return intervalId;
+}
+
+// Cleanup old signals
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 120000; // 2 minutes
+  
+  for (const [id, data] of intervalAlerts) {
+    if (now - data.createdAt > maxAge) intervalAlerts.delete(id);
+  }
+  for (const [id, data] of rotationAlerts) {
+    if (now - data.createdAt > maxAge) rotationAlerts.delete(id);
+  }
+}, 30000);
+
+// ===========================
+// API ENDPOINTS
 // ===========================
 
 // Health check
-app.get('/health', (req, res) => {
+app.get('/', (req, res) => {
   res.json({ 
-    status: 'ok', 
-    version: '3.0.0',
+    status: 'TV Sync Server v3.0.0',
+    symbols: state.filteredData.length,
+    allSymbols: state.allSymbols.length,
+    filters: state.selectedFilters,
+    index: state.currentIndex,
+    rotations: state.rotationsCount,
     browsers: browsers.size,
-    isRotating: state.isRotating,
-    currentIndex: state.currentIndex,
-    totalSymbols: state.allSymbols.length
+    uptime: Math.floor(process.uptime())
   });
 });
 
-// Main sync endpoint - browsers poll this
+// Wake endpoint
+app.get('/wake', (req, res) => {
+  res.json({ 
+    status: 'awake', 
+    version: 'v3.0.0',
+    symbols: state.filteredData.length,
+    allSymbols: state.allSymbols.length
+  });
+});
+
+// Main sync endpoint - RETURNS FILTERED DATA
 app.get('/sync', (req, res) => {
   const { browserId, tf } = req.query;
   const now = Date.now();
   
-  // Register/update browser
-  if (browserId) {
-    const isNew = !browsers.has(browserId);
-    browsers.set(browserId, { lastSeen: now, tf: tf || '?' });
-    
-    if (isNew) {
-      console.log(`🌐 Browser connected: ${browserId.slice(-8)} (${tf || '?'})`);
-      
-      // First browser becomes master
-      if (!state.settingsMasterId) {
-        state.settingsMasterId = browserId;
-        state.settingsMasterLastSeen = now;
-        
-        // Set justBecameMaster flag
-        browsers.get(browserId).justBecameMaster = true;
-        
-        console.log(`👑 First browser is master: ${browserId.slice(-8)}`);
-      }
-    }
-    
-    // Update master last seen
-    if (browserId === state.settingsMasterId) {
-      state.settingsMasterLastSeen = now;
-    }
+  if (!browserId) {
+    return res.status(400).json({ error: 'Missing browserId' });
   }
   
-  cleanupBrowsers();
+  // Update browser tracking
+  browsers.set(browserId, { 
+    lastSeen: now, 
+    tf: tf || '5',
+    isActive: true 
+  });
   
-  const currentSymbol = getCurrentSymbol();
-  const browsersList = getBrowsersList();
-  const isMaster = browserId === state.settingsMasterId;
-  
-  // Check if this browser just became master (for toast notification)
-  const justBecameMaster = isMaster && browsers.get(browserId)?.justBecameMaster;
-  if (justBecameMaster) {
-    browsers.get(browserId).justBecameMaster = false;
+  // Cleanup stale browsers
+  for (const [id, data] of browsers) {
+    if (now - data.lastSeen > 30000) browsers.delete(id);
   }
+  
+  // Check master status
+  let isMaster = false;
+  let justBecameMaster = false;
+  
+  if (!state.settingsMasterId || now - state.settingsMasterLastSeen > 15000) {
+    if (state.settingsMasterId !== browserId) {
+      state.settingsMasterId = browserId;
+      justBecameMaster = true;
+      console.log(`👑 New master: ${browserId.slice(-8)}`);
+    }
+    state.settingsMasterLastSeen = now;
+    isMaster = true;
+  } else if (browserId === state.settingsMasterId) {
+    state.settingsMasterLastSeen = now;
+    isMaster = true;
+  }
+  
+  // Get current symbol from FILTERED data (not allSymbols!)
+  const currentSymbol = state.filteredData[state.currentIndex] || null;
+  
+  // Browser list with TFs
+  const browsersList = Array.from(browsers.entries()).map(([id, data]) => ({
+    id: id.slice(-8),
+    tf: data.tf,
+    isMaster: id === state.settingsMasterId
+  }));
   
   res.json({
-    // Current rotation state
+    // Current rotation state - USE FILTERED DATA
     currentIndex: state.currentIndex,
     currentSymbol: currentSymbol,
-    totalSymbols: state.allSymbols.length,
-    allSymbols: state.allSymbols,
+    totalSymbols: state.filteredData.length,  // FILTERED count!
+    allSymbols: state.filteredData,           // Send FILTERED, not all
+    allSymbolsRaw: state.allSymbols.length,   // Raw count for info
     rotationsCount: state.rotationsCount,
     
     // Timing (master-controlled)
@@ -435,61 +413,23 @@ app.post('/claim-master', (req, res) => {
   const now = Date.now();
   
   if (!browserId) {
-    return res.json({ success: false, reason: 'no browserId' });
+    return res.status(400).json({ error: 'Missing browserId' });
   }
   
-  // Register browser if not exists
-  if (!browsers.has(browserId)) {
-    browsers.set(browserId, { lastSeen: now, tf: '?' });
-  }
-  
-  const currentMaster = state.settingsMasterId;
-  const currentMasterExists = currentMaster && browsers.has(currentMaster);
-  
-  let allowed = false;
-  let reason = '';
-  
-  if (force) {
-    allowed = true;
-    reason = 'force claim';
-  } else if (!currentMaster) {
-    allowed = true;
-    reason = 'no current master';
-  } else if (!currentMasterExists) {
-    allowed = true;
-    reason = 'master disconnected';
-  }
-  
-  if (allowed) {
-    const previousMaster = state.settingsMasterId;
+  if (force || !state.settingsMasterId || now - state.settingsMasterLastSeen > 15000) {
     state.settingsMasterId = browserId;
     state.settingsMasterLastSeen = now;
-    
-    // Mark for toast notification
-    const browser = browsers.get(browserId);
-    if (browser) browser.justBecameMaster = true;
-    
-    console.log(`👑 Master claimed: ${browserId.slice(-8)} (${reason})`);
-    if (previousMaster && previousMaster !== browserId) {
-      console.log(`   Previous: ${previousMaster.slice(-8)}`);
-    }
-    
-    res.json({ 
-      success: true, 
-      isMaster: true,
-      reason: reason
-    });
+    console.log(`👑 Master ${force ? 'forced' : 'claimed'}: ${browserId.slice(-8)}`);
+    res.json({ success: true, isMaster: true });
+  } else if (browserId === state.settingsMasterId) {
+    state.settingsMasterLastSeen = now;
+    res.json({ success: true, isMaster: true });
   } else {
-    res.json({ 
-      success: false, 
-      isMaster: false,
-      reason: 'master still active',
-      currentMaster: currentMaster?.slice(-8)
-    });
+    res.json({ success: false, isMaster: false, currentMaster: state.settingsMasterId?.slice(-8) });
   }
 });
 
-// Update settings (master only)
+// Settings update (master only)
 app.post('/settings', (req, res) => {
   const { 
     browserId, 
@@ -549,10 +489,12 @@ app.post('/settings', (req, res) => {
     console.log(`📜 History auto-clear: ${historyAutoClear} days`);
   }
   
-  if (selectedFilters) {
+  // KEY: When filters change, reapply and reset index
+  if (selectedFilters && JSON.stringify(selectedFilters) !== JSON.stringify(state.selectedFilters)) {
     state.selectedFilters = selectedFilters;
+    applyFilters();  // Reapply filters!
     changed = true;
-    console.log(`🏷️ Rating filters updated: ${selectedFilters.join(', ')}`);
+    console.log(`🏷️ Rating filters: ${selectedFilters.join(', ')} → ${state.filteredData.length} symbols`);
   }
   
   if (alertSettings) {
@@ -571,7 +513,7 @@ app.post('/settings', (req, res) => {
     saveState();
   }
   
-  res.json({ success: true, changed });
+  res.json({ success: true, changed, filteredCount: state.filteredData.length });
 });
 
 // Pause/resume rotation (master only)
@@ -584,212 +526,221 @@ app.post('/pause', (req, res) => {
   
   state.isPaused = paused;
   console.log(`⏸️ Rotation ${paused ? 'paused' : 'resumed'}`);
-  
   res.json({ success: true, isPaused: state.isPaused });
 });
 
-// Manual navigation (master only)
-app.post('/navigate', (req, res) => {
-  const { browserId, direction } = req.body;
+// Start rotation (master only)
+app.post('/start', (req, res) => {
+  const { browserId } = req.body;
   
   if (browserId !== state.settingsMasterId) {
     return res.json({ success: false, reason: 'not master' });
   }
   
-  if (state.allSymbols.length === 0) {
-    return res.json({ success: false, reason: 'no symbols' });
+  state.isRotating = true;
+  state.isPaused = false;
+  state.rotationStartTime = Date.now();
+  restartRotationTimer();
+  console.log(`🚀 Rotation started`);
+  res.json({ success: true });
+});
+
+// Stop rotation (master only)
+app.post('/stop', (req, res) => {
+  const { browserId } = req.body;
+  
+  if (browserId !== state.settingsMasterId) {
+    return res.json({ success: false, reason: 'not master' });
   }
   
-  if (direction === 'next') {
-    state.currentIndex = (state.currentIndex + 1) % state.allSymbols.length;
+  state.isRotating = false;
+  if (rotationTimer) clearInterval(rotationTimer);
+  console.log(`⏹️ Rotation stopped`);
+  res.json({ success: true });
+});
+
+// Navigate (master only)
+app.post('/navigate', (req, res) => {
+  const { browserId, direction, index } = req.body;
+  
+  if (browserId !== state.settingsMasterId) {
+    return res.json({ success: false, reason: 'not master' });
+  }
+  
+  if (typeof index === 'number') {
+    state.currentIndex = Math.max(0, Math.min(index, state.filteredData.length - 1));
+  } else if (direction === 'next') {
+    state.currentIndex++;
+    if (state.currentIndex >= state.filteredData.length) state.currentIndex = 0;
   } else if (direction === 'prev') {
-    state.currentIndex = state.currentIndex > 0 ? state.currentIndex - 1 : state.allSymbols.length - 1;
+    state.currentIndex--;
+    if (state.currentIndex < 0) state.currentIndex = state.filteredData.length - 1;
   }
   
   state.lastRotationTime = Date.now();
-  
-  const symbol = getCurrentSymbol();
-  console.log(`🔀 Manual: ${symbol?.Symbol} (${state.currentIndex + 1}/${state.allSymbols.length})`);
+  const current = state.filteredData[state.currentIndex];
+  console.log(`📍 Navigate: ${state.currentIndex + 1}/${state.filteredData.length} - ${current?.Symbol}`);
   
   res.json({ 
     success: true, 
-    currentIndex: state.currentIndex,
-    currentSymbol: symbol
+    currentIndex: state.currentIndex, 
+    currentSymbol: current 
   });
 });
 
-// Trigger CSV refresh (master only)
-app.post('/refresh-csv', (req, res) => {
-  const { browserId } = req.body;
+// Force CSV refresh
+app.post('/refresh-csv', async (req, res) => {
+  const result = await fetchCSV();
+  res.json({ success: result, count: state.filteredData.length, allCount: state.allSymbols.length });
+});
+
+// Set CSV URL
+app.post('/set-csv-url', (req, res) => {
+  const { browserId, url } = req.body;
   
   if (browserId !== state.settingsMasterId) {
     return res.json({ success: false, reason: 'not master' });
   }
   
-  fetchCSV().then(success => {
-    res.json({ success, totalSymbols: state.allSymbols.length });
+  if (url) {
+    csvUrl = url;
+    saveState();
+    console.log(`📊 CSV URL updated`);
+    res.json({ success: true });
+  } else {
+    res.json({ success: false, reason: 'no url' });
+  }
+});
+
+// ===========================
+// INTERVAL SUMMARY SYSTEM
+// ===========================
+app.get('/signal', (req, res) => {
+  // Get latest interval signal
+  let latestId = null;
+  let latestTime = 0;
+  
+  for (const [id, data] of intervalAlerts) {
+    if (data.createdAt > latestTime) {
+      latestTime = data.createdAt;
+      latestId = id;
+    }
+  }
+  
+  // Get latest rotation signal
+  let latestRotationId = null;
+  let latestRotationTime = 0;
+  
+  for (const [id, data] of rotationAlerts) {
+    if (data.createdAt > latestRotationTime) {
+      latestRotationTime = data.createdAt;
+      latestRotationId = id;
+    }
+  }
+  
+  res.json({
+    intervalId: latestId,
+    intervalTime: latestTime,
+    rotationId: latestRotationId,
+    rotationTime: latestRotationTime
   });
 });
 
-// ===========================
-// SIGNAL ENDPOINTS (for alert collection)
-// ===========================
-
-app.post('/signal-interval', (req, res) => {
-  const { browserId } = req.body;
-  
-  if (browserId !== state.settingsMasterId) {
-    return res.json({ success: false, reason: 'not master' });
-  }
-  
-  currentIntervalId = generateSignalId();
-  intervalSignalTime = Date.now();
-  intervalAlerts = {};
-  
-  console.log(`📢 Interval signal: ${currentIntervalId}`);
-  res.json({ success: true, intervalId: currentIntervalId });
+app.post('/interval-signal', (req, res) => {
+  const intervalId = createIntervalSignal();
+  console.log(`📢 Interval signal: ${intervalId}`);
+  res.json({ success: true, intervalId });
 });
-
-app.get('/signal-interval', (req, res) => {
-  if (Date.now() - intervalSignalTime > SIGNAL_TTL) {
-    return res.json({ intervalId: null, expired: true });
-  }
-  res.json({ intervalId: currentIntervalId, age: Date.now() - intervalSignalTime });
-});
-
-app.post('/signal-rotation', (req, res) => {
-  const { browserId } = req.body;
-  
-  if (browserId !== state.settingsMasterId) {
-    return res.json({ success: false, reason: 'not master' });
-  }
-  
-  currentRotationId = generateSignalId();
-  rotationSignalTime = Date.now();
-  rotationAlerts = {};
-  
-  console.log(`📢 Rotation signal: ${currentRotationId}`);
-  res.json({ success: true, rotationId: currentRotationId });
-});
-
-app.get('/signal-rotation', (req, res) => {
-  if (Date.now() - rotationSignalTime > SIGNAL_TTL) {
-    return res.json({ rotationId: null, expired: true });
-  }
-  res.json({ rotationId: currentRotationId, age: Date.now() - rotationSignalTime });
-});
-
-// ===========================
-// ALERT COLLECTION
-// ===========================
 
 app.post('/interval-alerts', (req, res) => {
-  const { browserId, alerts, tf, intervalId } = req.body;
+  const { browserId, alerts, intervalId } = req.body;
   
-  if (intervalId !== currentIntervalId) {
-    return res.json({ success: false, reason: 'stale signal' });
+  if (!intervalId || !intervalAlerts.has(intervalId)) {
+    return res.json({ success: false, reason: 'invalid intervalId' });
   }
   
-  intervalAlerts[browserId] = { alerts, tf, timestamp: Date.now() };
-  console.log(`📥 Interval from ${browserId.slice(-8)} (${tf}): ${countAlerts(alerts)}`);
+  const signal = intervalAlerts.get(intervalId);
+  
+  if (signal.respondedBrowsers.has(browserId)) {
+    return res.json({ success: false, reason: 'already responded' });
+  }
+  
+  signal.respondedBrowsers.add(browserId);
+  signal.alerts.push(...(alerts || []));
+  
+  console.log(`📥 Browser ${browserId.slice(-8)} pushed ${alerts?.length || 0} alerts for interval ${intervalId.slice(0, 8)}`);
+  
   res.json({ success: true });
 });
 
-app.get('/interval-alerts', (req, res) => {
-  const { clear } = req.query;
-  const combined = combineAlerts(intervalAlerts);
-  if (clear === 'true') intervalAlerts = {};
-  res.json(combined);
-});
-
-app.post('/rotation-alerts', (req, res) => {
-  const { browserId, alerts, tf, rotationId, totalSymbols, duration } = req.body;
+app.get('/interval-alerts/:intervalId', (req, res) => {
+  const { intervalId } = req.params;
+  const signal = intervalAlerts.get(intervalId);
   
-  if (rotationId !== currentRotationId) {
-    return res.json({ success: false, reason: 'stale signal' });
+  if (!signal) {
+    return res.json({ alerts: [], browserCount: 0 });
   }
   
-  rotationAlerts[browserId] = { alerts, tf, totalSymbols, duration, timestamp: Date.now() };
-  console.log(`📥 Rotation from ${browserId.slice(-8)} (${tf}): ${countAlerts(alerts)}`);
-  res.json({ success: true });
-});
-
-app.get('/rotation-alerts', (req, res) => {
-  const { clear } = req.query;
-  const combined = combineAlerts(rotationAlerts, true);
-  if (clear === 'true') rotationAlerts = {};
-  res.json(combined);
-});
-
-function combineAlerts(alertsMap, includeMetadata = false) {
-  const conditions = ['1x', '1c', '1-+', '1-', '2x', '2c', '2-+', '2-'];
-  const combined = {};
-  conditions.forEach(c => combined[c] = []);
-  
-  let totalAlerts = 0;
-  let sources = 0;
-  let totalSymbols = 0;
-  let duration = '0m 0s';
-  
-  Object.entries(alertsMap).forEach(([bid, data]) => {
-    sources++;
-    if (data.totalSymbols) totalSymbols = Math.max(totalSymbols, data.totalSymbols);
-    if (data.duration) duration = data.duration;
-    
-    conditions.forEach(c => {
-      if (data.alerts?.[c]?.length > 0) {
-        combined[c].push(...data.alerts[c]);
-        totalAlerts += data.alerts[c].length;
-      }
-    });
+  res.json({
+    alerts: signal.alerts,
+    browserCount: signal.respondedBrowsers.size
   });
+});
+
+// Rotation summary endpoints
+app.post('/rotation-alerts', (req, res) => {
+  const { browserId, alerts, rotationId } = req.body;
   
-  const result = { success: true, alerts: combined, totalAlerts, sources };
-  if (includeMetadata) {
-    result.totalSymbols = totalSymbols;
-    result.duration = duration;
+  if (!rotationId || !rotationAlerts.has(rotationId)) {
+    return res.json({ success: false, reason: 'invalid rotationId' });
   }
-  return result;
-}
-
-function countAlerts(alerts) {
-  if (!alerts) return 0;
-  return Object.values(alerts).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
-}
-
-// Reset server (for debugging)
-app.post('/reset', (req, res) => {
-  state.currentIndex = 0;
-  state.rotationsCount = 0;
-  state.settingsMasterId = null;
-  state.settingsMasterLastSeen = 0;
-  browsers.clear();
-  intervalAlerts = {};
-  rotationAlerts = {};
-  saveState();
-  console.log('🔄 Server reset');
+  
+  const signal = rotationAlerts.get(rotationId);
+  
+  if (signal.respondedBrowsers.has(browserId)) {
+    return res.json({ success: false, reason: 'already responded' });
+  }
+  
+  signal.respondedBrowsers.add(browserId);
+  if (!signal.alerts) signal.alerts = [];
+  signal.alerts.push(...(alerts || []));
+  
+  console.log(`📥 Browser ${browserId.slice(-8)} pushed ${alerts?.length || 0} rotation alerts`);
+  
   res.json({ success: true });
 });
 
+app.get('/rotation-alerts/:rotationId', (req, res) => {
+  const { rotationId } = req.params;
+  const signal = rotationAlerts.get(rotationId);
+  
+  if (!signal) {
+    return res.json({ alerts: [], browserCount: 0 });
+  }
+  
+  res.json({
+    alerts: signal.alerts || [],
+    browserCount: signal.respondedBrowsers.size
+  });
+});
+
 // ===========================
-// START SERVER
+// STARTUP
 // ===========================
-const PORT = process.env.PORT || 3000;
-
-// Load saved state
-loadState();
-
-// Initial CSV fetch if needed
-if (state.allSymbols.length === 0 || Date.now() - state.lastCsvFetch > 300000) {
-  fetchCSV();
-}
-
-// Start timers
-startRotationTimer();
-startCsvFetchTimer();
-
-app.listen(PORT, () => {
-  console.log(`🚀 TV Sync Server v3.0.0 on port ${PORT}`);
-  console.log(`   Rotation: ${state.rotateInterval}s | Fetch: ${state.fetchInterval}s`);
-  console.log(`   Symbols: ${state.allSymbols.length} | Index: ${state.currentIndex}`);
+app.listen(PORT, async () => {
+  console.log(`🚀 TV Sync Server v3.0.0 starting on port ${PORT}`);
+  
+  // Load saved state
+  loadState();
+  
+  // Fetch CSV if needed
+  if (state.allSymbols.length === 0 || Date.now() - state.lastCsvFetch > 3600000) {
+    await fetchCSV();
+  }
+  
+  // Start timers
+  restartRotationTimer();
+  startCsvFetchTimer();
+  
+  console.log(`✅ Server ready - ${state.filteredData.length}/${state.allSymbols.length} symbols (${state.selectedFilters.join(', ')})`);
 });
