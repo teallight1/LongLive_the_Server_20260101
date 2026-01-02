@@ -33,6 +33,7 @@ let state = {
   rotateInterval: 7,      // seconds
   fetchInterval: 120,     // seconds
   colLInterval: 10,       // seconds
+  intervalSummarySeconds: 60, // interval summary timing
   
   // Master-synced settings
   navigationMode: 'url',  // 'url' or 'typing'
@@ -92,6 +93,7 @@ function saveState() {
       rotateInterval: state.rotateInterval,
       fetchInterval: state.fetchInterval,
       colLInterval: state.colLInterval,
+      intervalSummarySeconds: state.intervalSummarySeconds,
       navigationMode: state.navigationMode,
       historyAutoClear: state.historyAutoClear,
       selectedFilters: state.selectedFilters,
@@ -117,6 +119,7 @@ function loadState() {
       state.rotateInterval = data.rotateInterval || 7;
       state.fetchInterval = data.fetchInterval || 120;
       state.colLInterval = data.colLInterval || 10;
+      state.intervalSummarySeconds = data.intervalSummarySeconds || 60;
       state.navigationMode = data.navigationMode || 'url';
       state.historyAutoClear = data.historyAutoClear || 7;
       if (data.selectedFilters) state.selectedFilters = data.selectedFilters;
@@ -403,6 +406,7 @@ app.get('/sync', (req, res) => {
     rotateInterval: state.rotateInterval,
     fetchInterval: state.fetchInterval,
     colLInterval: state.colLInterval,
+    intervalSummarySeconds: state.intervalSummarySeconds,
     timeToNextRotation: getTimeToNextRotation(),
     lastRotationTime: state.lastRotationTime,
     
@@ -496,6 +500,7 @@ app.post('/settings', (req, res) => {
     historyAutoClear,
     selectedFilters,
     alertSettings,
+    intervalSummarySeconds,
     csvUrl: newCsvUrl 
   } = req.body;
   
@@ -524,6 +529,12 @@ app.post('/settings', (req, res) => {
     state.colLInterval = colLInterval;
     changed = true;
     console.log(`🔄 ColL interval: ${colLInterval}s`);
+  }
+  
+  if (intervalSummarySeconds && intervalSummarySeconds !== state.intervalSummarySeconds) {
+    state.intervalSummarySeconds = intervalSummarySeconds;
+    changed = true;
+    console.log(`⏱️ Interval summary: ${intervalSummarySeconds}s`);
   }
   
   if (navigationMode && navigationMode !== state.navigationMode) {
