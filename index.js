@@ -245,6 +245,11 @@ function cleanupBrowsers() {
         const firstBrowser = browsers.keys().next().value;
         state.settingsMasterId = firstBrowser;
         state.settingsMasterLastSeen = now;
+        
+        // Set justBecameMaster flag for toast notification
+        const browser = browsers.get(firstBrowser);
+        if (browser) browser.justBecameMaster = true;
+        
         console.log(`👑 Auto-transferred master to: ${firstBrowser.slice(-8)}`);
       }
     }
@@ -331,6 +336,10 @@ app.get('/sync', (req, res) => {
       if (!state.settingsMasterId) {
         state.settingsMasterId = browserId;
         state.settingsMasterLastSeen = now;
+        
+        // Set justBecameMaster flag
+        browsers.get(browserId).justBecameMaster = true;
+        
         console.log(`👑 First browser is master: ${browserId.slice(-8)}`);
       }
     }
