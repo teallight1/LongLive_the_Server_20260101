@@ -1,7 +1,7 @@
 {
   "name": "tv-sync-server-v3",
   "version": "3.0.0",
-  "description": "TradingView Sync Server - Server-controlled rotation",
+  "description": "TradingView Sync Server with server-side filtering",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
