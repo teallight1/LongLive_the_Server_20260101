@@ -36,18 +36,25 @@ let state = {
   
   // Master-synced settings
   navigationMode: 'url',  // 'url' or 'typing'
-  alertConditionSettings: {
-    '1x': true, '1c': true, '1-+': true, '1-': true,
-    '2x': true, '2c': true, '2-+': true, '2-': true
+  historyAutoClear: 7,    // days
+  
+  // Rating filters (synced from master)
+  selectedFilters: ['Comfortable'],
+  
+  // Thresholds and Cooldowns (synced from master)
+  alertSettings: {
+    threshold_1c: 2, threshold_2c: 2,
+    threshold_1_minus: 20, threshold_2_minus: 20,
+    cooldown_1x: 15, cooldown_1c: 15, cooldown_1_plus: 15, cooldown_1_minus: 15,
+    cooldown_2x: 15, cooldown_2c: 15, cooldown_2_plus: 15, cooldown_2_minus: 15
   },
-  alertTimeframeSettings: {
-    '1': true, '3': true, '5': true, '15': true, '30': true,
-    '45': true, '60': true, '120': true, '240': true
-  },
+  
+  // These are NOT synced (independent per browser)
+  // alertConditionSettings, alertTimeframeSettings, screenshotSettings
   
   // Symbol data (from CSV)
   allSymbols: [],         // Raw CSV data
-  filteredData: [],       // After applying filters (for display, but each browser filters locally)
+  filteredData: [],       // After applying filters
   lastCsvFetch: 0,
   
   // Master tracking
@@ -86,8 +93,9 @@ function saveState() {
       fetchInterval: state.fetchInterval,
       colLInterval: state.colLInterval,
       navigationMode: state.navigationMode,
-      alertConditionSettings: state.alertConditionSettings,
-      alertTimeframeSettings: state.alertTimeframeSettings,
+      historyAutoClear: state.historyAutoClear,
+      selectedFilters: state.selectedFilters,
+      alertSettings: state.alertSettings,
       allSymbols: state.allSymbols,
       lastCsvFetch: state.lastCsvFetch,
       csvUrl: csvUrl,
@@ -110,8 +118,9 @@ function loadState() {
       state.fetchInterval = data.fetchInterval || 120;
       state.colLInterval = data.colLInterval || 10;
       state.navigationMode = data.navigationMode || 'url';
-      if (data.alertConditionSettings) state.alertConditionSettings = data.alertConditionSettings;
-      if (data.alertTimeframeSettings) state.alertTimeframeSettings = data.alertTimeframeSettings;
+      state.historyAutoClear = data.historyAutoClear || 7;
+      if (data.selectedFilters) state.selectedFilters = data.selectedFilters;
+      if (data.alertSettings) state.alertSettings = data.alertSettings;
       state.allSymbols = data.allSymbols || [];
       state.lastCsvFetch = data.lastCsvFetch || 0;
       if (data.csvUrl) csvUrl = data.csvUrl;
@@ -399,8 +408,9 @@ app.get('/sync', (req, res) => {
     
     // Master-synced settings
     navigationMode: state.navigationMode,
-    alertConditionSettings: state.alertConditionSettings,
-    alertTimeframeSettings: state.alertTimeframeSettings,
+    historyAutoClear: state.historyAutoClear,
+    selectedFilters: state.selectedFilters,
+    alertSettings: state.alertSettings,
     
     // Status
     isRotating: state.isRotating,
@@ -483,8 +493,9 @@ app.post('/settings', (req, res) => {
     fetchInterval, 
     colLInterval,
     navigationMode,
-    alertConditionSettings,
-    alertTimeframeSettings,
+    historyAutoClear,
+    selectedFilters,
+    alertSettings,
     csvUrl: newCsvUrl 
   } = req.body;
   
@@ -521,16 +532,22 @@ app.post('/settings', (req, res) => {
     console.log(`🧭 Navigation mode: ${navigationMode}`);
   }
   
-  if (alertConditionSettings) {
-    state.alertConditionSettings = alertConditionSettings;
+  if (historyAutoClear && historyAutoClear !== state.historyAutoClear) {
+    state.historyAutoClear = historyAutoClear;
     changed = true;
-    console.log(`✅ Alert conditions updated`);
+    console.log(`📜 History auto-clear: ${historyAutoClear} days`);
   }
   
-  if (alertTimeframeSettings) {
-    state.alertTimeframeSettings = alertTimeframeSettings;
+  if (selectedFilters) {
+    state.selectedFilters = selectedFilters;
     changed = true;
-    console.log(`✅ Alert timeframes updated`);
+    console.log(`🏷️ Rating filters updated: ${selectedFilters.join(', ')}`);
+  }
+  
+  if (alertSettings) {
+    state.alertSettings = alertSettings;
+    changed = true;
+    console.log(`📊 Thresholds/Cooldowns updated`);
   }
   
   if (newCsvUrl && newCsvUrl !== csvUrl) {
