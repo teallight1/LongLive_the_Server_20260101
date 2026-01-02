@@ -32,6 +32,18 @@ let state = {
   // Timing (controlled by master)
   rotateInterval: 7,      // seconds
   fetchInterval: 120,     // seconds
+  colLInterval: 10,       // seconds
+  
+  // Master-synced settings
+  navigationMode: 'url',  // 'url' or 'typing'
+  alertConditionSettings: {
+    '1x': true, '1c': true, '1-+': true, '1-': true,
+    '2x': true, '2c': true, '2-+': true, '2-': true
+  },
+  alertTimeframeSettings: {
+    '1': true, '3': true, '5': true, '15': true, '30': true,
+    '45': true, '60': true, '120': true, '240': true
+  },
   
   // Symbol data (from CSV)
   allSymbols: [],         // Raw CSV data
@@ -72,6 +84,10 @@ function saveState() {
       rotationsCount: state.rotationsCount,
       rotateInterval: state.rotateInterval,
       fetchInterval: state.fetchInterval,
+      colLInterval: state.colLInterval,
+      navigationMode: state.navigationMode,
+      alertConditionSettings: state.alertConditionSettings,
+      alertTimeframeSettings: state.alertTimeframeSettings,
       allSymbols: state.allSymbols,
       lastCsvFetch: state.lastCsvFetch,
       csvUrl: csvUrl,
@@ -92,6 +108,10 @@ function loadState() {
       state.rotationsCount = data.rotationsCount || 0;
       state.rotateInterval = data.rotateInterval || 7;
       state.fetchInterval = data.fetchInterval || 120;
+      state.colLInterval = data.colLInterval || 10;
+      state.navigationMode = data.navigationMode || 'url';
+      if (data.alertConditionSettings) state.alertConditionSettings = data.alertConditionSettings;
+      if (data.alertTimeframeSettings) state.alertTimeframeSettings = data.alertTimeframeSettings;
       state.allSymbols = data.allSymbols || [];
       state.lastCsvFetch = data.lastCsvFetch || 0;
       if (data.csvUrl) csvUrl = data.csvUrl;
@@ -370,11 +390,17 @@ app.get('/sync', (req, res) => {
     allSymbols: state.allSymbols,
     rotationsCount: state.rotationsCount,
     
-    // Timing
+    // Timing (master-controlled)
     rotateInterval: state.rotateInterval,
     fetchInterval: state.fetchInterval,
+    colLInterval: state.colLInterval,
     timeToNextRotation: getTimeToNextRotation(),
     lastRotationTime: state.lastRotationTime,
+    
+    // Master-synced settings
+    navigationMode: state.navigationMode,
+    alertConditionSettings: state.alertConditionSettings,
+    alertTimeframeSettings: state.alertTimeframeSettings,
     
     // Status
     isRotating: state.isRotating,
@@ -451,7 +477,16 @@ app.post('/claim-master', (req, res) => {
 
 // Update settings (master only)
 app.post('/settings', (req, res) => {
-  const { browserId, rotateInterval, fetchInterval, csvUrl: newCsvUrl } = req.body;
+  const { 
+    browserId, 
+    rotateInterval, 
+    fetchInterval, 
+    colLInterval,
+    navigationMode,
+    alertConditionSettings,
+    alertTimeframeSettings,
+    csvUrl: newCsvUrl 
+  } = req.body;
   
   // Verify master
   if (browserId !== state.settingsMasterId) {
@@ -472,6 +507,30 @@ app.post('/settings', (req, res) => {
     startCsvFetchTimer();
     changed = true;
     console.log(`📊 Fetch interval: ${fetchInterval}s`);
+  }
+  
+  if (colLInterval && colLInterval !== state.colLInterval) {
+    state.colLInterval = colLInterval;
+    changed = true;
+    console.log(`🔄 ColL interval: ${colLInterval}s`);
+  }
+  
+  if (navigationMode && navigationMode !== state.navigationMode) {
+    state.navigationMode = navigationMode;
+    changed = true;
+    console.log(`🧭 Navigation mode: ${navigationMode}`);
+  }
+  
+  if (alertConditionSettings) {
+    state.alertConditionSettings = alertConditionSettings;
+    changed = true;
+    console.log(`✅ Alert conditions updated`);
+  }
+  
+  if (alertTimeframeSettings) {
+    state.alertTimeframeSettings = alertTimeframeSettings;
+    changed = true;
+    console.log(`✅ Alert timeframes updated`);
   }
   
   if (newCsvUrl && newCsvUrl !== csvUrl) {
