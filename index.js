@@ -1,5 +1,5 @@
 // ===========================
-// TV SYNC SERVER v3.0.0 (v20260102_1115PST)
+// TV SYNC SERVER v3.0.0 (v20260103_1045PST)
 // Fixed: rotation-signal endpoint, interval/rotation alert combining
 // ===========================
 
@@ -317,7 +317,7 @@ app.get('/', (req, res) => {
 app.get('/wake', (req, res) => {
   res.json({ 
     status: 'awake', 
-    version: 'v3.0.0 (v20260102_1115PST)',
+    version: 'v3.0.0 (v20260103_1045PST)',
     symbols: state.filteredData.length,
     allSymbols: state.allSymbols.length
   });
@@ -678,9 +678,11 @@ app.post('/interval-alerts', (req, res) => {
   }
   
   signal.respondedBrowsers.add(browserId);
-  signal.alerts.push(...(alerts || []));
+  // alerts is an OBJECT like {1x: [], 2x: [], ...}, not an array!
+  signal.alerts.push(alerts);
   
-  console.log(`📥 Browser ${browserId.slice(-8)} pushed ${alerts?.length || 0} alerts for interval ${intervalId.slice(0, 8)}`);
+  const alertCount = Object.values(alerts || {}).reduce((sum, arr) => sum + (arr?.length || 0), 0);
+  console.log(`📥 Browser ${browserId.slice(-8)} pushed ${alertCount} alerts for interval ${intervalId.slice(0, 8)}`);
   
   res.json({ success: true });
 });
@@ -715,9 +717,11 @@ app.post('/rotation-alerts', (req, res) => {
   
   signal.respondedBrowsers.add(browserId);
   if (!signal.alerts) signal.alerts = [];
-  signal.alerts.push(...(alerts || []));
+  // alerts is an OBJECT like {1x: [], 2x: [], ...}, not an array!
+  signal.alerts.push(alerts);
   
-  console.log(`📥 Browser ${browserId.slice(-8)} pushed ${alerts?.length || 0} rotation alerts`);
+  const alertCount = Object.values(alerts || {}).reduce((sum, arr) => sum + (arr?.length || 0), 0);
+  console.log(`📥 Browser ${browserId.slice(-8)} pushed ${alertCount} rotation alerts`);
   
   res.json({ success: true });
 });
