@@ -1,6 +1,6 @@
 // ===========================
-// TV SYNC SERVER v3.0.0 (v20260102_1015PST_v1)
-// Server-side filtering fix
+// TV SYNC SERVER v3.0.0 (v20260102_1115PST)
+// Fixed: rotation-signal endpoint, interval/rotation alert combining
 // ===========================
 
 const express = require('express');
@@ -317,7 +317,7 @@ app.get('/', (req, res) => {
 app.get('/wake', (req, res) => {
   res.json({ 
     status: 'awake', 
-    version: 'v3.0.0',
+    version: 'v3.0.0 (v20260102_1115PST)',
     symbols: state.filteredData.length,
     allSymbols: state.allSymbols.length
   });
@@ -650,6 +650,18 @@ app.post('/interval-signal', (req, res) => {
   const intervalId = createIntervalSignal();
   console.log(`📢 Interval signal: ${intervalId}`);
   res.json({ success: true, intervalId });
+});
+
+// Create rotation signal (for master to trigger)
+app.post('/rotation-signal', (req, res) => {
+  const rotationId = `${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+  rotationAlerts.set(rotationId, {
+    createdAt: Date.now(),
+    alerts: [],
+    respondedBrowsers: new Set()
+  });
+  console.log(`📢 Rotation signal: ${rotationId}`);
+  res.json({ success: true, rotationId });
 });
 
 app.post('/interval-alerts', (req, res) => {
