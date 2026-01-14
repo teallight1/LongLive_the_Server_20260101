@@ -1,6 +1,6 @@
 // ===========================
-// TV SYNC SERVER v3.0.0 (v20260103_1045PST)
-// Fixed: rotation-signal endpoint, interval/rotation alert combining
+// TV SYNC SERVER v3.0.0 (v20260113_1600PST)
+// Added: /api/forward-alerts endpoint for CORS fallback
 // ===========================
 
 const express = require('express');
@@ -741,10 +741,43 @@ app.get('/rotation-alerts/:rotationId', (req, res) => {
 });
 
 // ===========================
+// FORWARD ALERTS (CORS FALLBACK)
+// ===========================
+app.post('/api/forward-alerts', async (req, res) => {
+  const { appsScriptUrl, payload } = req.body;
+  
+  if (!appsScriptUrl || !payload) {
+    return res.status(400).json({ success: false, reason: 'missing appsScriptUrl or payload' });
+  }
+  
+  try {
+    console.log(`📡 Forwarding ${payload.alerts?.length || 0} alerts to Apps Script...`);
+    
+    const response = await fetch(appsScriptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    
+    if (response.ok) {
+      const result = await response.text();
+      console.log(`✅ Forward success: ${payload.alerts?.length || 0} alerts, ${payload.screenshots?.length || 0} screenshots`);
+      res.json({ success: true, result });
+    } else {
+      console.log(`❌ Forward failed: HTTP ${response.status}`);
+      res.status(response.status).json({ success: false, reason: `HTTP ${response.status}` });
+    }
+  } catch (e) {
+    console.log(`❌ Forward error: ${e.message}`);
+    res.status(500).json({ success: false, reason: e.message });
+  }
+});
+
+// ===========================
 // STARTUP
 // ===========================
 app.listen(PORT, async () => {
-  console.log(`🚀 TV Sync Server v3.0.0 starting on port ${PORT}`);
+  console.log(`🚀 TV Sync Server v3.0.0 (v20260113_1600PST) starting on port ${PORT}`);
   
   // Load saved state
   loadState();
